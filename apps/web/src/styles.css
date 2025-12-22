@@ -1,0 +1,125 @@
+:root{
+  --bg:#0b0f19;
+  --panel:#111827;
+  --panel2:#0f172a;
+  --border:#1f2937;
+  --text:#e5e7eb;
+  --muted:#9ca3af;
+  --accent:#22c55e;
+  --danger:#ef4444;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";background:var(--bg);color:var(--text)}
+a{color:inherit}
+button,input,textarea{font:inherit}
+
+.layout{display:grid;grid-template-columns:320px 1fr;height:100vh}
+.sidebar{border-right:1px solid var(--border);background:var(--panel)}
+.main{display:flex;flex-direction:column;min-width:0}
+
+.sideTop{display:flex;gap:8px;padding:12px;border-bottom:1px solid var(--border)}
+.sideTop button{background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:8px 10px;border-radius:10px;cursor:pointer}
+.sideTop button:hover{border-color:#334155}
+.sideTop .danger{border-color:rgba(239,68,68,.5)}
+
+.sideList{overflow:auto;height:calc(100vh - 64px);padding:8px}
+.convItem{display:flex;flex-direction:column;gap:6px;padding:10px;border:1px solid transparent;border-radius:12px;cursor:pointer}
+.convItem:hover{background:rgba(255,255,255,.03)}
+.convItem.active{border-color:#334155;background:rgba(255,255,255,.04)}
+.convTitle{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.convMeta{font-size:12px;color:var(--muted);display:flex;gap:8px}
+
+.header{padding:12px 16px;border-bottom:1px solid var(--border);background:linear-gradient(to bottom, rgba(255,255,255,.04), rgba(255,255,255,0));}
+.headerTitle{font-weight:700}
+.headerSub{font-size:12px;color:var(--muted);margin-top:4px}
+
+.chat{flex:1;overflow:auto;padding:16px;display:flex;flex-direction:column;gap:16px}
+
+.msgRow{display:flex;gap:12px;align-items:flex-start;max-width:920px}
+.msgRow.user{margin-left:auto;flex-direction:row-reverse}
+.avatar{width:32px;height:32px;border-radius:10px;background:var(--panel);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-weight:800;color:#cbd5e1;flex:0 0 auto}
+.bubble{border:1px solid var(--border);background:var(--panel);border-radius:14px;padding:12px 14px;min-width:0}
+.msgRow.user .bubble{background:#0f1b2d;border-color:#1f2a44}
+.bubble .meta{font-size:12px;color:var(--muted);margin-bottom:6px}
+.bubble .content{white-space:pre-wrap;line-height:1.45}
+
+.citations{margin-top:10px;padding-top:10px;border-top:1px dashed rgba(148,163,184,.35);display:flex;flex-direction:column;gap:6px}
+.citeItem{font-size:12px;color:var(--muted)}
+.citeItem a{color:#93c5fd;text-decoration:none}
+.citeItem a:hover{text-decoration:underline}
+
+.composer{border-top:1px solid var(--border);padding:14px 16px;background:var(--panel)}
+.composerBox{display:flex;gap:10px;align-items:flex-end;max-width:920px;margin:0 auto}
+.textarea{flex:1;min-height:44px;max-height:200px;resize:none;border:1px solid var(--border);background:var(--panel2);color:var(--text);border-radius:14px;padding:10px 12px;outline:none}
+.textarea:focus{border-color:#334155}
+.send{border:1px solid rgba(34,197,94,.4);background:rgba(34,197,94,.15);color:var(--text);padding:10px 14px;border-radius:14px;cursor:pointer}
+.send:disabled{opacity:.5;cursor:not-allowed}
+
+.toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--panel);border:1px solid var(--border);padding:10px 12px;border-radius:12px;font-size:13px;color:var(--text);max-width:90vw}
+
+@media (max-width: 900px){
+  .layout{grid-template-columns:1fr}
+  .sidebar{display:none}
+}
+
+/* ===== Patch: dropdown citations + scroll fix ===== */
+
+/* Ensure main column can scroll properly (flex children must have min-height:0) */
+.main{
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden; /* avoid double scrollbars */
+}
+
+/* Make chat list the only vertical scroller */
+.chat{
+  flex: 1 1 auto;
+  min-height: 0;    /* IMPORTANT */
+  overflow-y: auto; /* scroll here */
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Citations dropdown */
+.citationsWrap{
+  margin-top: 10px;
+}
+
+.citationsToggle{
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.15);
+  color: inherit;
+  padding: 6px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.citationsPanel{
+  margin-top: 8px;
+  max-height: 240px; /* scroll inside citations */
+  overflow-y: auto;
+  padding-left: 10px;
+  border-left: 2px solid rgba(255,255,255,0.08);
+}
+
+.citeItem{
+  padding: 8px 0;
+}
+
+.citeSummary{
+  cursor: pointer;
+  opacity: 0.95;
+}
+
+.citeBody{
+  white-space: pre-wrap;
+  line-height: 1.55;
+  opacity: 0.92;
+  padding-top: 6px;
+}
