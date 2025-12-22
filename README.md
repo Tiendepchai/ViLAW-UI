@@ -1,5 +1,7 @@
 # Chat UI của ViLAW
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
 Giao diện chat UI đơn giản cho các dự án AI hỗ trợ bởi API dạng hỏi đáp (QA), RAG, Chatbot, v.v.
 
 ## 1) Yêu cầu
@@ -54,6 +56,9 @@ File `apps/web/.env`:
 - Repo này: `ViLAW`
 - Repo dự án gốc: `Tiendepchai/ViLAW` — https://github.com/Tiendepchai/ViLAW
 - Trong README của dự án gốc, chỉ cần link sang repo UI + hướng dẫn set `PROJECT_API_BASE`. 
+
+## License
+This project is licensed under the **MIT License** — see the [LICENSE](./LICENSE) file for details.
 
 ---
 
