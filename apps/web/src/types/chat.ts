@@ -1,7 +1,7 @@
 export type Role = 'user' | 'assistant'
 
 export type Citation = {
-  tag: string // e.g. C1
+  tag: string
   title: string
   url?: string
   doc_id?: string

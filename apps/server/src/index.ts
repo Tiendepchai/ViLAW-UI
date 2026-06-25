@@ -14,14 +14,11 @@ app.use(express.json({ limit: '2mb' }))
 const PORT = Number(process.env.PORT ?? 8787)
 const PROJECT_API_BASE = process.env.PROJECT_API_BASE ?? 'http://localhost:8080'
 const ASK_PATH = process.env.PROJECT_ASK_PATH ?? ''
-
-const DATA_FILE = process.env.DATA_FILE
-  ?? path.resolve(process.cwd(), '../../data/conversations.json')
-
-// Use SQLite for conversations when possible, fallback to JSON file
-let db = null
+const DATA_FILE = process.env.DATA_FILE ?? path.resolve(process.cwd(), '../../data/conversations.json')
 const DB_PATH = process.env.DB_PATH ?? path.resolve(process.cwd(), '../../data/vilaw.db')
 
+// ── SQLite ──
+let db: Database.Database | null = null
 try {
   db = new Database(DB_PATH)
   db.pragma('journal_mode = WAL')
@@ -45,28 +42,64 @@ try {
   `)
   console.log('[server] Using SQLite:', DB_PATH)
 } catch (e) {
-  console.warn('[server] SQLite unavailable, falling back to JSON file:', e.message)
+  console.warn('[server] SQLite unavailable, falling back to JSON file:', (e as Error).message)
   db = null
 }
 
-async function readConvs() {
+// ── Helpers ──
+interface Citation {
+  tag?: string
+  title?: string
+  url?: string
+  doc_id?: string
+  chunk_id?: string | number
+  [key: string]: unknown
+}
+
+interface Message {
+  id: string
+  role: string
+  content: string
+  createdAt: number
+  citations?: Citation[]
+}
+
+interface Conversation {
+  id: string
+  title: string
+  createdAt: number
+  updatedAt: number
+  messages: Message[]
+}
+
+function safeJsonParse(str: string, fallback: unknown): unknown {
+  try { return JSON.parse(str) } catch { return fallback }
+}
+
+// ── Conversation I/O ──
+async function readConvs(): Promise<Conversation[]> {
   if (db) {
-    const convs = db.prepare('SELECT * FROM conversations ORDER BY updated_at DESC').all()
+    const convs = db.prepare('SELECT * FROM conversations ORDER BY updated_at DESC').all() as Array<{
+      id: string; title: string; created_at: number; updated_at: number
+    }>
     const getMessages = db.prepare('SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at')
-    return convs.map(c => ({
+    return convs.map((c) => ({
       id: c.id,
       title: c.title,
       createdAt: c.created_at,
       updatedAt: c.updated_at,
-      messages: getMessages.all(c.id).map(m => ({
+      messages: (getMessages.all(c.id) as Array<{
+        id: string; role: string; content: string; citations: string; created_at: number
+      }>).map((m) => ({
         id: m.id,
         role: m.role,
         content: m.content,
         createdAt: m.created_at,
-        citations: safeJsonParse(m.citations, []),
+        citations: safeJsonParse(m.citations, []) as Citation[],
       })),
     }))
   }
+
   try {
     const raw = await fs.readFile(DATA_FILE, 'utf8')
     const data = JSON.parse(raw)
@@ -76,15 +109,15 @@ async function readConvs() {
   }
 }
 
-async function writeConvs(convs) {
+async function writeConvs(convs: Conversation[]): Promise<void> {
   if (db) {
-    const transaction = db.transaction((items) => {
+    const transaction = db.transaction((items: Conversation[]) => {
       for (const c of items) {
-        db.prepare(
+        db!.prepare(
           'INSERT OR REPLACE INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)'
         ).run(c.id, c.title ?? 'New chat', c.createdAt ?? 0, c.updatedAt ?? 0)
-        db.prepare('DELETE FROM messages WHERE conversation_id = ?').run(c.id)
-        const insertMsg = db.prepare(
+        db!.prepare('DELETE FROM messages WHERE conversation_id = ?').run(c.id)
+        const insertMsg = db!.prepare(
           'INSERT INTO messages (id, conversation_id, role, content, citations, created_at) VALUES (?, ?, ?, ?, ?, ?)'
         )
         for (const m of c.messages ?? []) {
@@ -95,14 +128,12 @@ async function writeConvs(convs) {
     transaction(convs)
     return
   }
+
   await fs.mkdir(path.dirname(DATA_FILE), { recursive: true })
   await fs.writeFile(DATA_FILE, JSON.stringify(convs, null, 2), 'utf8')
 }
 
-function safeJsonParse(str, fallback) {
-  try { return JSON.parse(str) } catch { return fallback }
-}
-
+// ── Routes ──
 app.get('/health', (_req, res) => {
   res.json({ ok: true, project_api: PROJECT_API_BASE, storage: db ? 'sqlite' : 'json' })
 })
@@ -112,38 +143,54 @@ app.get('/conversations', async (_req, res) => {
 })
 
 app.put('/conversations', async (req, res) => {
-  const convs = req.body
+  const convs = req.body as unknown
   if (!Array.isArray(convs)) {
-    return res.status(400).json({ error: 'Body phải là Conversation[]' })
+    res.status(400).json({ error: 'Body phải là Conversation[]' })
+    return
   }
   await writeConvs(convs)
   res.json({ ok: true, count: convs.length })
 })
 
-async function postJson(url, body) {
+// ── Proxy to backend ──
+interface PostResult {
+  ok: boolean
+  status: number
+  text: string
+  json: Record<string, unknown> | null
+}
+
+async function postJson(url: string, body: Record<string, unknown>): Promise<PostResult> {
   const r = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
   const text = await r.text()
-  let json = null
+  let json: Record<string, unknown> | null = null
   try { json = text ? JSON.parse(text) : null } catch { /* ignore */ }
   return { ok: r.ok, status: r.status, text, json }
 }
 
-function normalizeAskResponse(obj) {
+interface NormalizedAsk {
+  answer: string
+  citations: Citation[]
+  used_ctx: number | null
+}
+
+function normalizeAskResponse(obj: Record<string, unknown> | null): NormalizedAsk | null {
   if (!obj || typeof obj !== 'object') return null
-  const answer = obj.answer ?? obj.response ?? obj.text ?? obj.result ?? obj.message
-  const citations = obj.citations ?? obj.sources ?? obj.references
-  const used_ctx = obj.used_ctx ?? obj.used_context ?? obj.k
-  return { answer: answer ?? '', citations: Array.isArray(citations) ? citations : [], used_ctx }
+  const answer = String(obj.answer ?? obj.response ?? obj.text ?? obj.result ?? obj.message ?? '')
+  const citations = (obj.citations ?? obj.sources ?? obj.references) as Citation[] | undefined
+  const used_ctx = (obj.used_ctx ?? obj.used_context ?? obj.k ?? null) as number | null
+  return { answer, citations: Array.isArray(citations) ? citations : [], used_ctx }
 }
 
 app.post('/api/ask', async (req, res) => {
-  const { question, top_k } = req.body ?? {}
+  const { question, top_k } = (req.body ?? {}) as { question?: string; top_k?: number }
   if (!question || typeof question !== 'string') {
-    return res.status(400).json({ error: 'Thiếu question (string)' })
+    res.status(400).json({ error: 'Thiếu question (string)' })
+    return
   }
 
   const paths = [
@@ -156,14 +203,14 @@ app.post('/api/ask', async (req, res) => {
     '/answer',
   ]
 
-  const payloads = [
+  const payloads: Record<string, unknown>[] = [
     { question, top_k },
     { q: question, top_k },
     { query: question, top_k },
     { message: question, top_k },
   ]
 
-  let lastErr = null
+  let lastErr: string | null = null
 
   for (const p of paths) {
     const url = PROJECT_API_BASE.replace(/\/$/, '') + p
@@ -176,16 +223,18 @@ app.post('/api/ask', async (req, res) => {
         }
         const normalized = normalizeAskResponse(r.json)
         if (normalized && normalized.answer) {
-          return res.json(normalized)
+          res.json(normalized)
+          return
         }
-        return res.json(r.json ?? { answer: r.text })
+        res.json(r.json ?? { answer: r.text })
+        return
       } catch (e) {
-        lastErr = `${p} -> ${e?.message ?? e}`
+        lastErr = `${p} -> ${(e as Error)?.message ?? String(e)}`
       }
     }
   }
 
-  return res.status(502).json({
+  res.status(502).json({
     error: 'Không gọi được API dự án gốc. Hãy cấu hình PROJECT_API_BASE/PROJECT_ASK_PATH đúng.',
     tried_base: PROJECT_API_BASE,
     last_error: lastErr,
