@@ -153,6 +153,53 @@ app.put('/conversations', async (req, res) => {
 })
 
 // ── Proxy to backend ──
+const PROJECT_SEARCH_PATH = process.env.PROJECT_SEARCH_PATH ?? '/search'
+
+// SSE stream proxy: pipe backend SSE through to the client
+app.post('/api/ask/stream', async (req, res) => {
+  const { question, top_k } = (req.body ?? {}) as { question?: string; top_k?: number }
+  if (!question || typeof question !== 'string') {
+    res.status(400).json({ error: 'Thiếu question (string)' })
+    return
+  }
+
+  const streamUrl = (PROJECT_API_BASE.replace(/\/$/, '') + '/v1/ask/stream')
+
+  try {
+    const backendRes = await fetch(streamUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ q: question, top_k: top_k ?? 6 }),
+    })
+
+    if (!backendRes.ok) {
+      res.status(502).json({ error: 'Backend stream unavailable', detail: backendRes.status })
+      return
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.setHeader('Cache-Control', 'no-cache')
+    res.setHeader('Connection', 'keep-alive')
+    res.setHeader('X-Accel-Buffering', 'no')
+
+    const reader = backendRes.body?.getReader()
+    if (!reader) {
+      res.status(502).json({ error: 'No response body from backend' })
+      return
+    }
+
+    const decoder = new TextDecoder()
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      const text = decoder.decode(value, { stream: true })
+      res.write(text)
+    }
+    res.end()
+  } catch (e) {
+    res.status(502).json({ error: 'Stream proxy failed', detail: (e as Error).message })
+  }
+})
 interface PostResult {
   ok: boolean
   status: number

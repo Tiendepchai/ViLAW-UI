@@ -1,18 +1,8 @@
 import { create } from 'zustand'
 import { v4 as uuidv4 } from 'uuid'
-import type { ChatMessage, Conversation } from '../types/chat'
-import { ask } from '../lib/api'
+import type { ChatMessage, Conversation, Citation } from '../types/chat'
+import { ask, askStream } from '../api/ask'
 import { loadConversations, saveConversations } from '../lib/storage'
-
-function fmtTime(ts: number) {
-  const d = new Date(ts)
-  return d.toLocaleString('vi-VN', {
-    hour: '2-digit',
-    minute: '2-digit',
-    day: '2-digit',
-    month: '2-digit',
-  })
-}
 
 function makeEmptyConversation(): Conversation {
   const now = Date.now()
@@ -39,11 +29,8 @@ export interface ChatState {
   streaming: boolean
   streamingContent: string
   toast: string | null
-  // citations open state per message id
   openCites: Record<string, boolean>
-  fileInputRef: React.RefObject<HTMLInputElement | null> | null
 
-  // Actions
   init: () => Promise<void>
   selectConversation: (id: string) => void
   newChat: () => Promise<void>
@@ -66,24 +53,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   init: async () => {
     try {
-      const convs = loadConversations instanceof Function
-        ? await loadConversations()
-        : []
+      const convs = await loadConversations()
       set({ conversations: convs, activeId: convs[0]?.id ?? null })
-    } catch (e: any) {
-      set({ toast: e?.message ?? 'Không thể tải hội thoại' })
+    } catch (e: unknown) {
+      set({ toast: (e as Error)?.message ?? 'Không thể tải hội thoại' })
     }
   },
 
-  selectConversation: (id: string) => {
-    set({ activeId: id })
-  },
+  selectConversation: (id: string) => set({ activeId: id }),
 
   newChat: async () => {
     const c = makeEmptyConversation()
     const next = [c, ...get().conversations]
     set({ conversations: next, activeId: c.id })
-    try { await saveConversations(next) } catch (e: any) { set({ toast: e?.message ?? 'Lỗi lưu' }) }
+    try { await saveConversations(next) } catch { /* ignore */ }
   },
 
   deleteActive: async () => {
@@ -91,7 +74,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!activeId) return
     const next = conversations.filter((c) => c.id !== activeId)
     set({ conversations: next, activeId: next[0]?.id ?? null })
-    try { await saveConversations(next) } catch (e: any) { set({ toast: e?.message ?? 'Lỗi lưu' }) }
+    try { await saveConversations(next) } catch { /* ignore */ }
   },
 
   send: async (text: string) => {
@@ -108,47 +91,106 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     const withUser = conversations.map((c) =>
       c.id === activeId
-        ? { ...c, messages: [...c.messages, userMsg, assistantMsg], updatedAt: now, title: inferTitle([...c.messages, userMsg]) }
+        ? {
+            ...c,
+            messages: [...c.messages, userMsg, assistantMsg],
+            updatedAt: now,
+            title: inferTitle([...c.messages, userMsg]),
+          }
         : c
     )
     set({ conversations: withUser })
     try { await saveConversations(withUser) } catch { /* ignore */ }
 
+    // Try streaming first, fall back to regular ask
+    let usedStream = false
+    const streamPromise = askStream(
+      text,
+      {
+        onToken: (token: string) => {
+          usedStream = true
+          set((s) => ({ streamingContent: s.streamingContent + token }))
+        },
+        onCitations: (citations: Citation[]) => {
+          // Store citations for the final message
+          const msgId = assistantMsg.id
+          set((s) => ({
+            conversations: s.conversations.map((c) =>
+              c.id === activeId
+                ? {
+                    ...c,
+                    messages: c.messages.map((m) =>
+                      m.id === msgId ? { ...m, citations } : m
+                    ),
+                  }
+                : c
+            ),
+          }))
+        },
+        onDone: () => {
+          // Finalize the assistant message with accumulated content
+          const finalContent = get().streamingContent
+          const finalCitations = (() => {
+            const msgs = get().conversations.find((c) => c.id === activeId)?.messages ?? []
+            const am = msgs.find((m) => m.id === assistantMsg.id)
+            return am?.citations
+          })()
+
+          const filled: ChatMessage = {
+            id: assistantMsg.id,
+            role: 'assistant',
+            content: finalContent,
+            createdAt: Date.now(),
+            citations: finalCitations ?? [],
+          }
+
+          set((s) => ({
+            loading: false,
+            streaming: false,
+            streamingContent: '',
+            conversations: s.conversations.map((c) =>
+              c.id === activeId
+                ? {
+                    ...c,
+                    messages: c.messages.map((m) => (m.id === assistantMsg.id ? filled : m)),
+                    updatedAt: Date.now(),
+                  }
+                : c
+            ),
+          }))
+          saveConversations(get().conversations).catch(() => {})
+        },
+        onError: (error: string) => {
+          // If stream connection failed, fallback to regular ask
+          if (!usedStream) {
+            doRegularAsk(text, userMsg, assistantMsg)
+          } else {
+            set((s) => ({
+              loading: false,
+              streaming: false,
+              streamingContent: '',
+              toast: error,
+            }))
+          }
+        },
+      },
+    )
+
+    // Race: if streaming doesn't produce first token within 3s, fallback
+    const timeout = new Promise<void>((_, reject) =>
+      setTimeout(() => reject(new Error('stream_timeout')), 3000)
+    )
+
     try {
-      const res = await ask(text, { conversation_id: activeId })
-      set({ streaming: false, loading: false, streamingContent: '' })
-
-      const filled: ChatMessage = {
-        id: assistantMsg.id,
-        role: 'assistant',
-        content: res.answer ?? '',
-        createdAt: Date.now(),
-        citations: res.citations ?? [],
+      await Promise.race([streamPromise, timeout])
+      // Wait for stream to finish if it started
+      if (usedStream) {
+        await streamPromise
       }
-
-      const withAssistant = get().conversations.map((c) =>
-        c.id === activeId
-          ? { ...c, messages: c.messages.map((m) => (m.id === assistantMsg.id ? filled : m)), updatedAt: Date.now() }
-          : c
-      )
-      set({ conversations: withAssistant })
-      try { await saveConversations(withAssistant) } catch (e: any) { set({ toast: e?.message ?? 'Lỗi lưu' }) }
-    } catch (e: any) {
-      set({ streaming: false, loading: false, streamingContent: '' })
-      const errMsg = e?.message ?? 'Lỗi gọi API'
-      const errAssistant: ChatMessage = {
-        id: assistantMsg.id,
-        role: 'assistant',
-        content: `⚠️ ${errMsg}`,
-        createdAt: Date.now(),
+    } catch {
+      if (!usedStream) {
+        doRegularAsk(text, userMsg, assistantMsg)
       }
-      const withError = get().conversations.map((c) =>
-        c.id === activeId
-          ? { ...c, messages: c.messages.map((m) => (m.id === assistantMsg.id ? errAssistant : m)), updatedAt: Date.now() }
-          : c
-      )
-      set({ conversations: withError, toast: errMsg })
-      try { await saveConversations(withError) } catch { /* ignore */ }
     }
   },
 
@@ -178,8 +220,60 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({ conversations: convs, activeId: convs[0]?.id ?? null })
       try { await saveConversations(convs) } catch { /* ignore */ }
       set({ toast: 'Đã import JSON' })
-    } catch (err: any) {
-      set({ toast: err?.message ?? 'Import thất bại' })
+    } catch (err) {
+      set({ toast: (err as Error)?.message ?? 'Import thất bại' })
     }
   },
 }))
+
+// Fallback regular ask function
+async function doRegularAsk(text: string, userMsg: ChatMessage, assistantMsg: ChatMessage) {
+  const store = useChatStore.getState()
+  const { activeId } = store
+  if (!activeId) return
+
+  setImmediate(() => {
+    useChatStore.setState({ streaming: false })
+  })
+
+  try {
+    const res = await ask(text, { conversation_id: activeId })
+    const filled: ChatMessage = {
+      id: assistantMsg.id,
+      role: 'assistant',
+      content: res.answer ?? '',
+      createdAt: Date.now(),
+      citations: res.citations ?? [],
+    }
+
+    useChatStore.setState((s) => ({
+      loading: false,
+      streamingContent: '',
+      conversations: s.conversations.map((c) =>
+        c.id === activeId
+          ? { ...c, messages: c.messages.map((m) => (m.id === assistantMsg.id ? filled : m)), updatedAt: Date.now() }
+          : c
+      ),
+    }))
+    await saveConversations(useChatStore.getState().conversations)
+  } catch (e) {
+    const errMsg = (e as Error)?.message ?? 'Lỗi gọi API'
+    useChatStore.setState({
+      loading: false,
+      toast: errMsg,
+      conversations: useChatStore.getState().conversations.map((c) =>
+        c.id === activeId
+          ? {
+              ...c,
+              messages: c.messages.map((m) =>
+                m.id === assistantMsg.id
+                  ? { ...m, content: `⚠️ ${errMsg}`, createdAt: Date.now() }
+                  : m
+              ),
+              updatedAt: Date.now(),
+            }
+          : c
+      ),
+    })
+  }
+}
